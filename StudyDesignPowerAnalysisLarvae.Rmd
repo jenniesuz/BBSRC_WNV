@@ -1,0 +1,272 @@
+---
+title: "Study Design: Power Analyses for Larvae"
+author: "Jen"
+date: "2026-05-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lme4)
+library(GLMMmisc)
+library(ggplot2)
+library(parallel)
+library(sf)
+library(here)
+library(tidyverse)
+```
+
+## Presence: Larval data
+
+### Run one before simulating many times
+
+```{r}
+points <- st_read(here(".//QGIS//waterbodiesClippedRamsar500bufferwithFragAndMajLC.shp"))
+# split points into quartiles by mca
+points$mcaq <- with(points, cut(menCrAr, 
+                                breaks=quantile(menCrAr, probs=seq(0,1, by=0.25), na.rm=TRUE), 
+                                include.lowest=TRUE))
+```
+
+```{r}
+# create dataset 
+months <-   month.abb[-c(1:3,10:12)]               # months sampled
+larvalSites <- 1:10                                # larval sites per habitat type per area
+area <- LETTERS[1:4]                               # 4 Ramsar sites
+years <- c(1)
+habitat <- c("wood","grass","suburban","arable") # most common land cover types
+moz.data <- expand.grid(larvalSites=larvalSites,habitat=habitat,months=months,area=area,years=years)
+
+mcaQ1 <- sample(points$menCrAr[points$mcaq %in% "[0,0.0381]"],length(moz.data$area)/4)
+mcaQ2 <- sample(points$menCrAr[points$mcaq %in% "(0.0381,0.115]"],length(moz.data$area)/4)
+mcaQ3 <- sample(points$menCrAr[points$mcaq %in% "(0.115,0.326]"],length(moz.data$area)/4)
+mcaQ4 <- sample(points$menCrAr[points$mcaq %in% "(0.326,13.6]"],length(moz.data$area)/4)
+
+moz.data$mca[moz.data$habitat %in% "wood"] <- mcaQ4
+moz.data$mca[!moz.data$habitat %in% "wood"] <- sample(cbind(mcaQ1,mcaQ2,mcaQ3))
+
+moz.data$row.id <- factor(paste("row", 1:nrow(moz.data), sep = ""))
+moz.data$n <- 1
+
+```
+
+```{r}
+hist(moz.data$mca)
+```
+
+Assume separate effects of majority land class and woodland core mean area 
+```{r}
+cxpIntercept <- 1.5
+mca <- 0.5
+
+bwood  <- 2  
+suburb <- 1     
+grass  <- 0.5
+arabl  <- 0.1
+```
+
+### One run before simulating many times
+
+Simulate abundance using GLMMMisc
+```{r}
+moz.data <-
+  sim.glmm(
+    design.data = moz.data,
+    fixed.eff =
+      list(
+        intercept = log(cxpIntercept),
+         habitat = log(c("wood"=bwood,"grass"=grass,"suburban"=suburb,"arable"=arabl)),
+         mca=log(mca)
+        ),
+    rand.V =               # add in some random effects 
+        inv.mor(
+         c(months = 1.5)),             
+    distribution = "binomial")   
+```
+
+Proportion presence
+```{r}
+sum(moz.data$response)/length(moz.data$response)
+```
+
+Summarise and visualise
+```{r}
+test <- moz.data %>%
+  group_by(habitat) %>%
+  summarise(propPresent=sum(response)/length(response))
+
+test
+```
+
+```{r}
+test <- moz.data %>%
+  group_by(mca) %>%
+  summarise(propPresent=sum(response)/length(response))
+
+test
+```
+
+
+Fit a model
+```{r}
+mod <- lme4::glmer(response ~ habitat + mca + (1|months), family = "binomial", data = moz.data)
+summary(mod)
+```
+
+```{r}
+output <- summary(mod)
+cfs <- output$coefficients
+exp(cfs)
+```
+
+
+
+## Simulate many times
+Write a function which does the above
+```{r}
+
+pwrFunc <- function(...){
+  library("GLMMmisc")
+  library("lme4")
+  # create dataset - study design first
+ # create dataset 
+  months <-   month.abb[-c(1:3,10:12)]               # months sampled
+  larvalSites <- 1:tS                             # larval sites per habitat type
+  area <- LETTERS[1:4]                               # 4 geographic/ council areas e.g. Sefton
+  years <- c(1)
+  habitat <- c("wood","grass","suburban","arable") # most common land cover types
+  moz.data <- expand.grid(larvalSites=larvalSites,habitat=habitat,months=months,area=area,years=years)
+
+  mcaQ1 <- sample(points$menCrAr[points$mcaq %in% "[0,0.0381]"],length(moz.data$area)/4)
+  mcaQ2 <- sample(points$menCrAr[points$mcaq %in% "(0.0381,0.115]"],length(moz.data$area)/4)
+  mcaQ3 <- sample(points$menCrAr[points$mcaq %in% "(0.115,0.326]"],length(moz.data$area)/4)
+  mcaQ4 <- sample(points$menCrAr[points$mcaq %in% "(0.326,13.6]"],length(moz.data$area)/4)
+
+  moz.data$mca[moz.data$habitat %in% "wood"] <- mcaQ4
+  moz.data$mca[!moz.data$habitat %in% "wood"] <- sample(cbind(mcaQ1,mcaQ2,mcaQ3))
+
+  moz.data$row.id <- factor(paste("row", 1:nrow(moz.data), sep = ""))
+  moz.data$n <- 1
+
+
+  moz.data <-
+   sim.glmm(
+     design.data = moz.data,
+     fixed.eff =
+        list(
+          intercept = log(cxpIntercept),
+           habitat = log(c("wood"=bwood,"grass"=grass,"suburban"=suburb,"arable"=arabl)),
+           mca=log(mca)
+         ),
+      rand.V =               # add in some random effects 
+          inv.mor(
+          c(months = monthRand)),             
+     distribution = "binomial") 
+  
+  
+  #fit glmm
+  mod <- lme4::glmer(response ~ habitat + mca + (1|months), family = "binomial", data = moz.data)
+ 
+   output <- summary(mod)
+   cfs<-output$coefficients
+
+   
+  cfs <-output$coefficients
+  grass <-cfs[2,4]
+  suburb <-cfs[3,4]
+  arable <-cfs[4,4]
+  mca <- cfs[5,4]
+
+  pvalgrass <- 0
+  pvalsuburb <- 0
+  pvalarable <- 0
+  pvalmca <- 0
+
+
+  if(length(output$optinfo$conv$lme4$messages)==0){
+    if(grass<=0.05){pvalgrass<-1}
+    if(suburb<=0.05){pvalsuburb<-1}
+    if(arable<=0.05){pvalarable<-1}
+    if(mca<=0.05){pvalmca<-1}
+  }
+  return(c(pvalgrass,pvalsuburb,pvalarable,pvalmca))
+}
+
+```
+
+
+Scenario 1
+```{r}
+monthRand <- 1.5
+
+cxpIntercept <- 1.5
+mca <- 0.5
+
+bwood  <- 2  
+suburb <- 1     
+grass  <- 0.5
+arabl  <- 0.1
+
+tS <- 30
+```
+
+
+Run in parallel
+```{r}
+
+cl <- makeCluster(detectCores()-1)               # get cores from your computer - 1
+clusterExport(cl, varlist=c("pwrFunc","monthRand","mca","points","bwood","suburb","grass","arabl","cxpIntercept","tS"),
+              envir=environment())               
+
+
+start <- Sys.time()
+sim.res <- parLapply(cl,1:100,pwrFunc) 
+stopCluster(cl)   # stop the clusters
+end <- Sys.time()
+end - start
+
+```
+
+
+Calculate power to detect a difference
+```{r}
+l <- do.call(rbind,sim.res)
+l2 <- rowSums(l)
+
+# Power
+length(l2[l2==4])/100*100
+```
+
+### Simulate across different sample sizes and assumed effect sizes
+
+```{r}
+sampleSizes <- c(10,15,20,25,30,25,40,45,50)
+
+sims <- lapply(sampleSizes,function(x){
+  cl <- makeCluster(detectCores()-1)               # get cores from your computer - 1
+  clusterExport(cl, varlist=c("pwrFunc","monthRand","mca","points","bwood","suburb","grass","arabl","cxpIntercept","tS"),
+              envir=environment())               
+
+  sim.res <- parLapply(cl,1:1000,pwrFunc,totalSites=x) 
+  stopCluster(cl)
+  
+  l <- do.call(rbind,sim.res)
+  l2 <- rowSums(l)
+
+# Power
+pwr <- length(l2[l2==4])/1000*100
+return(pwr)
+})
+
+```
+
+```{r}
+pwrsim <- cbind.data.frame(sampleSizes, pwr=do.call(rbind,sims))
+```
+
+```{r}
+ggplot(pwrsim) +
+  geom_point(aes(sampleSizes,pwr))
+```
+With the current set of coefficients and with three covariates, plus some random effect of month to get near 80% need c. 100 sites per year per area
+
